@@ -1,0 +1,601 @@
+local Players = game:GetService("Players")
+local Teams = game:GetService("Teams")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+
+local localPlayer = Players.LocalPlayer
+
+local DEFAULT_GREEN = Color3.fromRGB(0, 255, 150)
+local DEFAULT_RED = Color3.fromRGB(255, 75, 75)
+local CRATE_COLOR = Color3.fromRGB(255, 200, 0)
+
+local COLOR_PALETTE = {
+    Color3.fromRGB(255, 75, 75),
+    Color3.fromRGB(0, 255, 150),
+    Color3.fromRGB(0, 150, 255),
+    Color3.fromRGB(255, 230, 0),
+    Color3.fromRGB(255, 0, 255),
+    Color3.fromRGB(255, 150, 0),
+    Color3.fromRGB(0, 255, 255),
+    Color3.fromRGB(255, 255, 255),
+}
+
+local espEnabled = true
+local showNames = true
+local tracersEnabled = false
+local cratesEnabled = false
+local noclipEnabled = false   -- Added
+
+local panelVisible = true
+local panelMinimized = false
+
+local teamEnabled = {}
+local teamColors = {}
+local teamColorIndex = {}
+
+local trackedCharacters = {}
+local crateHighlights = {}
+
+local noclipConnection = nil   -- Added
+
+----------------------------------------------------------------
+-- Noclip Logic (Added)
+----------------------------------------------------------------
+local function toggleNoclip()
+    noclipEnabled = not noclipEnabled
+    if noclipEnabled then
+        noclipConnection = RunService.Heartbeat:Connect(function()
+            if localPlayer.Character then
+                for _, part in ipairs(localPlayer.Character:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        part.CanCollide = false
+                    end
+                end
+            end
+        end)
+    else
+        if noclipConnection then
+            noclipConnection:Disconnect()
+            noclipConnection = nil
+        end
+    end
+end
+
+----------------------------------------------------------------
+-- Crate logic
+----------------------------------------------------------------
+local CRATE_NAME = "VoughtCrate"
+local crateSpawnsFolder = Workspace:WaitForChild("Map1"):WaitForChild("CrateSpawns")
+
+local function removeCrateHighlight(model)
+    local h = crateHighlights[model]
+    if h then
+        h:Destroy()
+        crateHighlights[model] = nil
+    end
+end
+
+local function addCrateHighlight(model)
+    if not cratesEnabled then return end
+    if crateHighlights[model] then return end
+
+    local h = Instance.new("Highlight")
+    h.Name = "CrateESP_Highlight"
+    h.FillColor = CRATE_COLOR
+    h.FillTransparency = 0.4
+    h.OutlineColor = CRATE_COLOR
+    h.OutlineTransparency = 0
+    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    h.Parent = model
+
+    crateHighlights[model] = h
+end
+
+local function refreshCrates()
+    for model, _ in pairs(crateHighlights) do
+        removeCrateHighlight(model)
+    end
+
+    if not cratesEnabled then return end
+
+    for _, child in ipairs(crateSpawnsFolder:GetChildren()) do
+        if child.Name == CRATE_NAME and child:IsA("Model") then
+            addCrateHighlight(child)
+        end
+    end
+end
+
+crateSpawnsFolder.ChildAdded:Connect(function(child)
+    if child.Name == CRATE_NAME and child:IsA("Model") then
+        addCrateHighlight(child)
+    end
+end)
+
+crateSpawnsFolder.ChildRemoved:Connect(function(child)
+    removeCrateHighlight(child)
+end)
+
+----------------------------------------------------------------
+-- Player ESP logic
+----------------------------------------------------------------
+local function teamKey(player)
+    return player.Team or "NoTeam"
+end
+
+local function getColorFor(player)
+    local key = teamKey(player)
+    if teamColors[key] then
+        return teamColors[key]
+    end
+    if player.Team and localPlayer.Team and player.Team == localPlayer.Team then
+        return DEFAULT_GREEN
+    end
+    return DEFAULT_RED
+end
+
+local function isTeamEnabled(player)
+    local key = teamKey(player)
+    if teamEnabled[key] == nil then
+        return true
+    end
+    return teamEnabled[key]
+end
+
+local function removeTracking(player)
+    local data = trackedCharacters[player]
+    if data then
+        if data.highlight then data.highlight:Destroy() end
+        if data.billboard then data.billboard:Destroy() end
+        if data.healthConn then data.healthConn:Disconnect() end
+        if data.beam then data.beam:Destroy() end
+        if data.attachment0 then data.attachment0:Destroy() end
+        if data.attachment1 then data.attachment1:Destroy() end
+        trackedCharacters[player] = nil
+    end
+end
+
+local function applyHighlight(player, character)
+    if player == localPlayer then return end
+
+    removeTracking(player)
+
+    if not isTeamEnabled(player) then return end
+    if not espEnabled and not tracersEnabled then return end
+
+    local color = getColorFor(player)
+    local highlight, billboard, healthConn
+
+    if espEnabled then
+        highlight = Instance.new("Highlight")
+        highlight.Name = "Sinos_Highlight"
+        highlight.FillColor = color
+        highlight.FillTransparency = 0.5
+        highlight.OutlineColor = color
+        highlight.OutlineTransparency = 0
+        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        highlight.Parent = character
+
+        local head = character:WaitForChild("Head", 5)
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+        if head then
+            billboard = Instance.new("BillboardGui")
+            billboard.Name = "Sinos_NameTag"
+            billboard.Adornee = head
+            billboard.Size = UDim2.new(0, 150, 0, 48)
+            billboard.StudsOffset = Vector3.new(0, 2, 0)
+            billboard.AlwaysOnTop = true
+            billboard.Enabled = showNames
+            billboard.Parent = head
+
+            local nameLabel = Instance.new("TextLabel")
+            nameLabel.Name = "NameLabel"
+            nameLabel.Size = UDim2.new(1, 0, 0, 22)
+            nameLabel.BackgroundTransparency = 1
+            nameLabel.TextColor3 = color
+            nameLabel.TextStrokeTransparency = 0.5
+            nameLabel.Font = Enum.Font.GothamBold
+            nameLabel.TextScaled = true
+            nameLabel.Text = player.Name
+            nameLabel.Parent = billboard
+
+            local healthLabel = Instance.new("TextLabel")
+            healthLabel.Name = "HealthLabel"
+            healthLabel.Size = UDim2.new(1, 0, 0, 18)
+            healthLabel.Position = UDim2.new(0, 0, 0, 24)
+            healthLabel.BackgroundTransparency = 1
+            healthLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+            healthLabel.TextStrokeTransparency = 0.5
+            healthLabel.Font = Enum.Font.Gotham
+            healthLabel.TextScaled = true
+            healthLabel.Parent = billboard
+
+            local function updateHealthLabel()
+                if humanoid then
+                    healthLabel.Text = math.floor(math.max(humanoid.Health, 0)) .. " / " .. math.floor(humanoid.MaxHealth)
+                else
+                    healthLabel.Text = "?"
+                end
+            end
+
+            updateHealthLabel()
+            if humanoid then
+                healthConn = humanoid.HealthChanged:Connect(updateHealthLabel)
+            end
+        end
+    end
+
+    local beam, attachment0, attachment1
+    if tracersEnabled then
+        local myCharacter = localPlayer.Character
+        local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+        local theirRoot = character:FindFirstChild("HumanoidRootPart")
+
+        if myRoot and theirRoot then
+            attachment0 = Instance.new("Attachment")
+            attachment0.Parent = myRoot
+
+            attachment1 = Instance.new("Attachment")
+            attachment1.Parent = theirRoot
+
+            beam = Instance.new("Beam")
+            beam.Attachment0 = attachment0
+            beam.Attachment1 = attachment1
+            beam.Color = ColorSequence.new(color)
+            beam.Width0 = 0.05
+            beam.Width1 = 0.05
+            beam.FaceCamera = true
+            beam.Enabled = true
+            beam.Parent = myRoot
+        end
+    end
+
+    trackedCharacters[player] = {
+        highlight = highlight,
+        billboard = billboard,
+        healthConn = healthConn,
+        beam = beam,
+        attachment0 = attachment0,
+        attachment1 = attachment1,
+    }
+end
+
+local function refreshAll()
+    for player, _ in pairs(trackedCharacters) do
+        removeTracking(player)
+    end
+    if espEnabled or tracersEnabled then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= localPlayer and player.Character then
+                applyHighlight(player, player.Character)
+            end
+        end
+    end
+end
+
+local function onPlayerAdded(player)
+    if player == localPlayer then return end
+
+    player.CharacterAdded:Connect(function(character)
+        applyHighlight(player, character)
+    end)
+
+    if player.Character then
+        applyHighlight(player, player.Character)
+    end
+
+    player:GetPropertyChangedSignal("Team"):Connect(function()
+        if player.Character then
+            applyHighlight(player, player.Character)
+        end
+    end)
+end
+
+local function onPlayerRemoving(player)
+    removeTracking(player)
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+    onPlayerAdded(player)
+end
+Players.PlayerAdded:Connect(onPlayerAdded)
+Players.PlayerRemoving:Connect(onPlayerRemoving)
+
+localPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    refreshAll()
+end)
+
+localPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+    for player, _ in pairs(trackedCharacters) do
+        if player.Character then
+            applyHighlight(player, player.Character)
+        end
+    end
+end)
+
+----------------------------------------------------------------
+-- GUI Remake (SINOS Theme)
+----------------------------------------------------------------
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "Sinos_GUI"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = localPlayer:WaitForChild("PlayerGui")
+
+local teamList = Teams:GetTeams()
+local TEAM_ROW_HEIGHT = 28
+local BASE_HEIGHT = 185
+local TEAM_LIST_HEIGHT = math.clamp(#teamList * TEAM_ROW_HEIGHT + TEAM_ROW_HEIGHT, TEAM_ROW_HEIGHT, 150)
+local PANEL_FULL_HEIGHT = BASE_HEIGHT + TEAM_LIST_HEIGHT + 34  -- Extra space for noclip
+
+local panel = Instance.new("Frame")
+panel.Name = "Sinos_Panel"
+panel.AnchorPoint = Vector2.new(0.5, 0.5)
+panel.Size = UDim2.new(0, 220, 0, PANEL_FULL_HEIGHT)
+panel.Position = UDim2.new(0.5, 0, 0.5, 0)
+panel.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+panel.BorderSizePixel = 0
+panel.ClipsDescendants = true
+panel.Active = true
+panel.Parent = screenGui
+
+local panelCorner = Instance.new("UICorner")
+panelCorner.CornerRadius = UDim.new(0, 10)
+panelCorner.Parent = panel
+
+local panelStroke = Instance.new("UIStroke")
+panelStroke.Color = Color3.fromRGB(45, 45, 55)
+panelStroke.Thickness = 1
+panelStroke.Parent = panel
+
+local titleBar = Instance.new("TextLabel")
+titleBar.Name = "TitleBar"
+titleBar.Size = UDim2.new(1, 0, 0, 28)
+titleBar.BackgroundColor3 = Color3.fromRGB(28, 28, 35)
+titleBar.Text = "   SINOS"
+titleBar.TextXAlignment = Enum.TextXAlignment.Left
+titleBar.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleBar.Font = Enum.Font.GothamBold
+titleBar.TextSize = 14
+titleBar.Parent = panel
+
+local titleCorner = Instance.new("UICorner")
+titleCorner.CornerRadius = UDim.new(0, 10)
+titleCorner.Parent = titleBar
+
+local minimizeButton = Instance.new("TextButton")
+minimizeButton.Name = "MinimizeButton"
+minimizeButton.Size = UDim2.new(0, 28, 0, 28)
+minimizeButton.Position = UDim2.new(1, -28, 0, 0)
+minimizeButton.BackgroundTransparency = 1
+minimizeButton.TextColor3 = Color3.fromRGB(180, 180, 180)
+minimizeButton.Font = Enum.Font.GothamBold
+minimizeButton.TextSize = 16
+minimizeButton.Text = "—"
+minimizeButton.ZIndex = 2
+minimizeButton.Parent = titleBar
+
+local function makeToggleButton(parent, name, yPos, text, activeInit)
+    local button = Instance.new("TextButton")
+    button.Name = name
+    button.Size = UDim2.new(1, -20, 0, 30)
+    button.Position = UDim2.new(0, 10, 0, yPos)
+    button.BackgroundColor3 = activeInit and Color3.fromRGB(32, 45, 38) or Color3.fromRGB(28, 28, 33)
+    button.TextColor3 = activeInit and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(180, 180, 180)
+    button.Font = Enum.Font.GothamBold
+    button.TextSize = 13
+    button.Text = text
+    button.Parent = parent
+
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = button
+    
+    local s = Instance.new("UIStroke")
+    s.Color = activeInit and Color3.fromRGB(0, 120, 70) or Color3.fromRGB(40, 40, 48)
+    s.Thickness = 1
+    s.Parent = button
+
+    return button, s
+end
+
+local espButton, espStroke     = makeToggleButton(panel, "ToggleESPButton",     38,  "ESP: ON", true)
+local namesButton, namesStroke   = makeToggleButton(panel, "ToggleNamesButton",   72,  "Names: ON", true)
+local tracersButton, tracersStroke = makeToggleButton(panel, "ToggleTracersButton", 106, "Tracers: OFF", false)
+local cratesButton, cratesStroke  = makeToggleButton(panel, "ToggleCratesButton",  140, "Crates: OFF", false)
+local noclipButton, noclipStroke  = makeToggleButton(panel, "ToggleNoclipButton",  174, "Noclip: OFF", false)  -- Added
+
+local function updateButtonState(btn, stroke, state, baseText)
+    if state then
+        btn.BackgroundColor3 = Color3.fromRGB(32, 45, 38)
+        btn.TextColor3 = Color3.fromRGB(0, 255, 150)
+        stroke.Color = Color3.fromRGB(0, 120, 70)
+        btn.Text = baseText .. ": ON"
+    else
+        btn.BackgroundColor3 = Color3.fromRGB(28, 28, 33)
+        btn.TextColor3 = Color3.fromRGB(180, 180, 180)
+        stroke.Color = Color3.fromRGB(40, 40, 48)
+        btn.Text = baseText .. ": OFF"
+    end
+end
+
+espButton.MouseButton1Click:Connect(function()
+    espEnabled = not espEnabled
+    updateButtonState(espButton, espStroke, espEnabled, "ESP")
+    refreshAll()
+end)
+
+namesButton.MouseButton1Click:Connect(function()
+    showNames = not showNames
+    updateButtonState(namesButton, namesStroke, showNames, "Names")
+    for _, data in pairs(trackedCharacters) do
+        if data.billboard then
+            data.billboard.Enabled = showNames
+        end
+    end
+end)
+
+tracersButton.MouseButton1Click:Connect(function()
+    tracersEnabled = not tracersEnabled
+    updateButtonState(tracersButton, tracersStroke, tracersEnabled, "Tracers")
+    refreshAll()
+end)
+
+cratesButton.MouseButton1Click:Connect(function()
+    cratesEnabled = not cratesEnabled
+    updateButtonState(cratesButton, cratesStroke, cratesEnabled, "Crates")
+    refreshCrates()
+end)
+
+noclipButton.MouseButton1Click:Connect(function()  -- Added
+    toggleNoclip()
+    updateButtonState(noclipButton, noclipStroke, noclipEnabled, "Noclip")
+end)
+
+local teamListLabel = Instance.new("TextLabel")
+teamListLabel.Size = UDim2.new(1, -20, 0, 18)
+teamListLabel.Position = UDim2.new(0, 10, 0, 212)  -- Slightly adjusted
+teamListLabel.BackgroundTransparency = 1
+teamListLabel.TextColor3 = Color3.fromRGB(140, 140, 150)
+teamListLabel.Font = Enum.Font.GothamBold
+teamListLabel.TextSize = 12
+teamListLabel.TextXAlignment = Enum.TextXAlignment.Left
+teamListLabel.Text = "Filter Teams:"
+teamListLabel.Parent = panel
+
+local teamScroll = Instance.new("ScrollingFrame")
+teamScroll.Size = UDim2.new(1, -20, 0, TEAM_LIST_HEIGHT - TEAM_ROW_HEIGHT)
+teamScroll.Position = UDim2.new(0, 10, 0, 232)  -- Slightly adjusted
+teamScroll.BackgroundTransparency = 1
+teamScroll.BorderSizePixel = 0
+teamScroll.ScrollBarThickness = 2
+teamScroll.ScrollBarImageColor3 = Color3.fromRGB(60, 60, 70)
+teamScroll.CanvasSize = UDim2.new(0, 0, 0, (#teamList + 1) * TEAM_ROW_HEIGHT)
+teamScroll.Parent = panel
+
+local function addTeamToggleRow(key, displayName, index, initialColor)
+    teamEnabled[key] = true
+    teamColors[key] = initialColor
+    teamColorIndex[key] = 1
+
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -4, 0, TEAM_ROW_HEIGHT - 4)
+    row.Position = UDim2.new(0, 0, 0, (index - 1) * TEAM_ROW_HEIGHT)
+    row.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+    row.BorderSizePixel = 0
+    row.Parent = teamScroll
+
+    local rc = Instance.new("UICorner")
+    rc.CornerRadius = UDim.new(0, 4)
+    rc.Parent = row
+
+    local swatch = Instance.new("TextButton")
+    swatch.Size = UDim2.new(0, 16, 0, 16)
+    swatch.Position = UDim2.new(0, 6, 0.5, -8)
+    swatch.BackgroundColor3 = initialColor
+    swatch.Text = ""
+    swatch.Parent = row
+
+    local sc = Instance.new("UICorner")
+    sc.CornerRadius = UDim.new(0, 4)
+    sc.Parent = swatch
+
+    swatch.MouseButton1Click:Connect(function()
+        teamColorIndex[key] = (teamColorIndex[key] % #COLOR_PALETTE) + 1
+        local newColor = COLOR_PALETTE[teamColorIndex[key]]
+        teamColors[key] = newColor
+        swatch.BackgroundColor3 = newColor
+        refreshAll()
+    end)
+
+    local toggle = Instance.new("TextButton")
+    toggle.Size = UDim2.new(1, -34, 1, 0)
+    toggle.Position = UDim2.new(0, 30, 0, 0)
+    toggle.BackgroundTransparency = 1
+    toggle.TextColor3 = Color3.fromRGB(220, 220, 225)
+    toggle.Font = Enum.Font.Gotham
+    toggle.TextSize = 12
+    toggle.TextXAlignment = Enum.TextXAlignment.Left
+    toggle.Text = "✓  " .. displayName
+    toggle.Parent = row
+
+    toggle.MouseButton1Click:Connect(function()
+        teamEnabled[key] = not teamEnabled[key]
+        if teamEnabled[key] then
+            toggle.Text = "✓  " .. displayName
+            toggle.TextColor3 = Color3.fromRGB(220, 220, 225)
+        else
+            toggle.Text = "X  " .. displayName
+            toggle.TextColor3 = Color3.fromRGB(120, 120, 130)
+        end
+        refreshAll()
+    end)
+end
+
+for i, team in ipairs(teamList) do
+    local defaultColor = (localPlayer.Team == team) and DEFAULT_GREEN or DEFAULT_RED
+    addTeamToggleRow(team, team.Name, i, defaultColor)
+end
+addTeamToggleRow("NoTeam", "No Team", #teamList + 1, DEFAULT_RED)
+
+----------------------------------------------------------------
+-- Minimize logic
+----------------------------------------------------------------
+local function setMinimized(minimized)
+    panelMinimized = minimized
+    if minimized then
+        panel.Size = UDim2.new(0, 220, 0, PANEL_MIN_HEIGHT)
+        minimizeButton.Text = "+"
+    else
+        panel.Size = UDim2.new(0, 220, 0, PANEL_FULL_HEIGHT)
+        minimizeButton.Text = "—"
+    end
+end
+
+minimizeButton.MouseButton1Click:Connect(function()
+    setMinimized(not panelMinimized)
+end)
+
+----------------------------------------------------------------
+-- Right Ctrl: hide/show the whole panel
+----------------------------------------------------------------
+UserInputService.InputBegan:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.RightControl then
+        panelVisible = not panelVisible
+        panel.Visible = panelVisible
+    end
+end)
+
+----------------------------------------------------------------
+-- Dragging logic
+----------------------------------------------------------------
+local dragging = false
+local dragStart
+local startPos
+
+titleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = panel.Position
+
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        panel.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
